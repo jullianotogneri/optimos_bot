@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: optimos-bot
+    env: python
+    plan: free
+    buildCommand: ""
+    startCommand: python optimos_bot.py
+    envVars:
+      - key: TOKEN
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
