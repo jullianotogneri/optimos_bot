@@ -1,121 +1,177 @@
 import os
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
+import logging
+from telegram import (
+    Update,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+)
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters, ConversationHandler
+    ApplicationBuilder,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+    CallbackQueryHandler,
+    ConversationHandler,
 )
 import googlemaps
 from geopy.distance import geodesic
 
-# Carregar variáveis de ambiente
-TOKEN = os.getenv("TOKEN")
+# Ative o log para ver erros no Render
+logging.basicConfig(level=logging.INFO)
+
+# Tokens (você deve configurar isso como variáveis de ambiente no Render)
+TELEGRAM_TOKEN = os.getenv("TOKEN")
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
 gmaps = googlemaps.Client(key=GOOGLE_API_KEY)
 
-# Etapas da conversa
+# Estados da conversa
 (
-    INICIAR, NOME, EMBARQUE, DESTINO, PASSAGEIROS, BAGAGEM, CONFIRMACAO
-) = range(7)
+    NOME,
+    EMBARQUE,
+    DESTINO,
+    PASSAGEIROS,
+    BAGAGEM,
+    CONFIRMACAO,
+) = range(6)
 
-# Início com botão
-async def iniciar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    keyboard = [[KeyboardButton("🚗 Solicitar Corrida")]]
-    await update.message.reply_text("Olá! Toque no botão abaixo para começar:", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
-    return INICIAR
+# Funções auxiliares
+def calcular_distancia(origem, destino):
+    resultado = gmaps.distance_matrix(origem, destino, mode="driving")
+    metros = resultado["rows"][0]["elements"][0]["distance"]["value"]
+    return metros / 1000  # km
 
-async def nome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Qual o seu nome?", reply_markup=ReplyKeyboardRemove())
+def calcular_valor(distancia, passageiros, tem_bagagem):
+    valor_km = 2.5
+    valor = distancia * valor_km
+    if passageiros > 2:
+        valor += (passageiros - 2) * 0.5 * distancia
+    if tem_bagagem:
+        valor += 0.5 * distancia
+    return max(valor, 9.0)
+
+# Início
+async def iniciar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    botao = [[KeyboardButton("🚗 Solicitar Corrida")]]
+    await update.message.reply_text(
+        "Olá! Bem-vindo ao Bot de Corridas Optimos.\nClique no botão abaixo para iniciar.",
+        reply_markup=ReplyKeyboardMarkup(botao, one_time_keyboard=True, resize_keyboard=True),
+    )
     return NOME
 
-async def salvar_nome(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receber_nome(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     context.user_data["nome"] = update.message.text
-    await update.message.reply_text("Informe o local de EMBARQUE (nome ou endereço):")
+    await update.message.reply_text("Qual o endereço de embarque?")
     return EMBARQUE
 
-async def salvar_embarque(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receber_embarque(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["embarque"] = update.message.text
-    await update.message.reply_text("Informe o local de DESTINO (nome ou endereço):")
+    await update.message.reply_text("Qual o destino da sua viagem?")
     return DESTINO
 
-async def salvar_destino(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+async def receber_destino(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["destino"] = update.message.text
-
-    keyboard = [[KeyboardButton("1"), KeyboardButton("2")],
-                [KeyboardButton("3"), KeyboardButton("4")]]
-    await update.message.reply_text("Quantos passageiros?", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
+    botoes = [
+        [InlineKeyboardButton("1", callback_data="1"),
+         InlineKeyboardButton("2", callback_data="2"),
+         InlineKeyboardButton("3", callback_data="3"),
+         InlineKeyboardButton("4", callback_data="4")]
+    ]
+    await update.message.reply_text(
+        "Quantos passageiros vão na corrida?",
+        reply_markup=InlineKeyboardMarkup(botoes),
+    )
     return PASSAGEIROS
 
-async def salvar_passageiros(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["passageiros"] = int(update.message.text)
+async def escolher_passageiros(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["passageiros"] = int(query.data)
 
-    keyboard = [[KeyboardButton("✅ Sim"), KeyboardButton("❌ Não")]]
-    await update.message.reply_text("Leva bagagem ou compras?", reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
+    botoes = [
+        [InlineKeyboardButton("Sim", callback_data="sim"),
+         InlineKeyboardButton("Não", callback_data="nao")]
+    ]
+    await query.edit_message_text(
+        "Vai levar bagagem ou compras?",
+        reply_markup=InlineKeyboardMarkup(botoes),
+    )
     return BAGAGEM
 
-async def salvar_bagagem(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    context.user_data["bagagem"] = update.message.text == "✅ Sim"
+async def escolher_bagagem(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    context.user_data["bagagem"] = query.data == "sim"
 
-    origem = gmaps.geocode(f"{context.user_data['embarque']}, Cachoeiro de Itapemirim - ES")[0]["geometry"]["location"]
-    destino = gmaps.geocode(f"{context.user_data['destino']}, Cachoeiro de Itapemirim - ES")[0]["geometry"]["location"]
-
-    origem_coords = (origem["lat"], origem["lng"])
-    destino_coords = (destino["lat"], destino["lng"])
-    distancia_km = round(geodesic(origem_coords, destino_coords).km, 2)
-
+    origem = context.user_data["embarque"]
+    destino = context.user_data["destino"]
     passageiros = context.user_data["passageiros"]
-    extra_passageiro = max(0, passageiros - 2) * 0.50 * distancia_km
-    extra_bagagem = 0.50 * distancia_km if context.user_data["bagagem"] else 0
+    tem_bagagem = context.user_data["bagagem"]
 
-    valor_corrida = 2.50 * distancia_km + extra_passageiro + extra_bagagem
-    valor_corrida = max(valor_corrida, 9.00)
-
-    context.user_data["distancia"] = distancia_km
-    context.user_data["valor"] = round(valor_corrida, 2)
+    distancia = calcular_distancia(origem, destino)
+    valor = calcular_valor(distancia, passageiros, tem_bagagem)
 
     resumo = (
-        f"Resumo da corrida:\n"
-        f"🧍 Cliente: {context.user_data['nome']}\n"
-        f"📍 De: {context.user_data['embarque']}\n"
-        f"🏁 Para: {context.user_data['destino']}\n"
+        f"👤 Cliente: {context.user_data['nome']}\n"
+        f"📍 Embarque: {origem}\n"
+        f"🏁 Destino: {destino}\n"
         f"👥 Passageiros: {passageiros}\n"
-        f"🧳 Bagagem: {'Sim' if context.user_data['bagagem'] else 'Não'}\n"
-        f"📏 Distância: {distancia_km:.2f} km\n"
-        f"💰 Valor estimado: R$ {valor_corrida:.2f}\n"
-        f"Pagamento: PIX (28999642265), Dinheiro ou Cartão."
+        f"🧳 Bagagem/Compras: {'Sim' if tem_bagagem else 'Não'}\n"
+        f"📏 Distância estimada: {distancia:.2f} km\n"
+        f"💵 Valor estimado: R$ {valor:.2f}\n\n"
+        f"Formas de pagamento: PIX (28999642265), Dinheiro ou Cartão."
     )
 
-    keyboard = [[KeyboardButton("✅ Confirmar"), KeyboardButton("❌ Cancelar")]]
-    await update.message.reply_text(resumo, reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True))
+    botoes = [
+        [InlineKeyboardButton("✅ Aceitar Corrida", callback_data="aceitar")],
+        [InlineKeyboardButton("❌ Cancelar", callback_data="cancelar")]
+    ]
+
+    await query.edit_message_text(
+        resumo,
+        reply_markup=InlineKeyboardMarkup(botoes),
+    )
+
     return CONFIRMACAO
 
-async def confirmar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    if update.message.text == "✅ Confirmar":
-        await update.message.reply_location(latitude=-20.8483, longitude=-41.1129)
-        await update.message.reply_text("🚗 O motorista está a caminho! Obrigado por escolher a Optimos.")
+async def confirmar_corrida(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    if query.data == "aceitar":
+        await query.edit_message_text("🚗 O motorista está a caminho!\n🌐 Acompanhe a localização em tempo real: https://maps.app.goo.gl/FakeLocationLink")
     else:
-        await update.message.reply_text("👍 Corrida cancelada. Estamos à disposição!")
+        await query.edit_message_text("Corrida cancelada. Obrigado por usar o Bot Optimos! 👋")
+
     return ConversationHandler.END
 
-async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Atendimento cancelado.")
+async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Atendimento cancelado. Envie 🚗 para começar novamente.")
     return ConversationHandler.END
 
+# Main
 if __name__ == "__main__":
-    app = ApplicationBuilder().token(TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    conv = ConversationHandler(
-        entry_points=[MessageHandler(filters.Regex("🚗 Solicitar Corrida"), nome)],
+    conversa = ConversationHandler(
+        entry_points=[
+            MessageHandler(filters.Regex("🚗"), receber_nome),
+            CommandHandler("start", iniciar)
+        ],
         states={
-            INICIAR: [MessageHandler(filters.Regex("🚗 Solicitar Corrida"), nome)],
-            NOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, salvar_nome)],
-            EMBARQUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, salvar_embarque)],
-            DESTINO: [MessageHandler(filters.TEXT & ~filters.COMMAND, salvar_destino)],
-            PASSAGEIROS: [MessageHandler(filters.Regex("^[1-4]$"), salvar_passageiros)],
-            BAGAGEM: [MessageHandler(filters.Regex("^(✅ Sim|❌ Não)$"), salvar_bagagem)],
-            CONFIRMACAO: [MessageHandler(filters.Regex("^(✅ Confirmar|❌ Cancelar)$"), confirmar)],
+            NOME: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_nome)],
+            EMBARQUE: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_embarque)],
+            DESTINO: [MessageHandler(filters.TEXT & ~filters.COMMAND, receber_destino)],
+            PASSAGEIROS: [CallbackQueryHandler(escolher_passageiros)],
+            BAGAGEM: [CallbackQueryHandler(escolher_bagagem)],
+            CONFIRMACAO: [CallbackQueryHandler(confirmar_corrida)],
         },
-        fallbacks=[CommandHandler("cancelar", cancelar)]
+        fallbacks=[CommandHandler("cancelar", cancelar)],
     )
 
-    app.add_handler(CommandHandler("start", iniciar))
-    app.add_handler(conv)
+    app.add_handler(conversa)
     app.run_polling()

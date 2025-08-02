@@ -3,7 +3,7 @@ services:
     name: optimos-bot
     env: python
     plan: free
-    buildCommand: ""
+    buildCommand: pip install -r requirements.txt
     startCommand: python optimos_bot.py
     envVars:
       - key: TOKEN
